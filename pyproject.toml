@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infinitetalk"
+version = "0.1.0"
+description = "InfiniteTalk: Audio-driven Video Generation for Sparse-Frame Video Dubbing"
+requires-python = ">=3.10"
+dependencies = [
+    "torch==2.8.0",
+    "torchvision",
+    "torchaudio",
+    "xformers==0.0.32.post2",
+    "misaki[en]",
+    "ninja",
+    "psutil",
+    "packaging",
+    "wheel",
+    "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.3.14/flash_attn-2.8.2+cu124torch2.8-cp312-cp312-linux_x86_64.whl",
+    "librosa",
+    "opencv-python>=4.9.0.80",
+    "diffusers>=0.31.0",
+    "transformers>=4.49.0",
+    "tokenizers>=0.20.3",
+    "accelerate>=1.1.1",
+    "tqdm",
+    "imageio",
+    "easydict",
+    "ftfy",
+    "dashscope",
+    "imageio-ffmpeg",
+    "scikit-image",
+    "loguru",
+    "numpy>=1.23.5,<2",
+    "xfuser>=0.4.1",
+    "pyloudnorm",
+    "optimum-quanto==0.2.6",
+    "scenedetect",
+    "moviepy==1.0.3",
+    "decord",
+    "ffmpeg-python",
+    "soundfile==0.13.1",
+    "tensorrt==10.13.0.35",
+    "nvidia-cuda-runtime",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+xformers = { index = "pytorch-cu128" }
+
+[project.scripts]
+generate-infinitetalk = "generate_infinitetalk:main"
+infinitetalk-app = "app:main"
+
+[tool.setuptools]
+py-modules = ["generate_infinitetalk", "app"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wan*", "kokoro*", "src*", "infinitetalk*"]

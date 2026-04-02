@@ -658,6 +658,10 @@ def generate(args):
     logging.info("Finished.")
 
 
-if __name__ == "__main__":
+def main():
     args = _parse_args()
     generate(args)
+
+
+if __name__ == "__main__":
+    main()
