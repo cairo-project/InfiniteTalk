@@ -450,7 +450,12 @@ def process_tts_multi(text, save_dir, voice1, voice2):
     # sum, _ = librosa.load(save_path_sum, sr=16000)
     return s1, s2, save_path_sum
 
-def generate(args):
+def init_pipeline(args):
+    """Initialize distributed environment, load the pipeline and audio encoder.
+
+    Returns:
+        tuple: (wan_i2v, wav2vec_feature_extractor, audio_encoder, rank)
+    """
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
     local_rank = int(os.getenv("LOCAL_RANK", 0))
@@ -491,21 +496,6 @@ def generate(args):
             ulysses_degree=args.ulysses_size,
         )
 
-    # TODO: use prompt refine
-    # if args.use_prompt_extend:
-    #     if args.prompt_extend_method == "dashscope":
-    #         prompt_expander = DashScopePromptExpander(
-    #             model_name=args.prompt_extend_model,
-    #             is_vl="i2v" in args.task or "flf2v" in args.task)
-    #     elif args.prompt_extend_method == "local_qwen":
-    #         prompt_expander = QwenPromptExpander(
-    #             model_name=args.prompt_extend_model,
-    #             is_vl="i2v" in args.task,
-    #             device=rank)
-    #     else:
-    #         raise NotImplementedError(
-    #             f"Unsupport prompt_extend_method: {args.prompt_extend_method}")
-
     cfg = WAN_CONFIGS[args.task]
     if args.ulysses_size > 1:
         assert cfg.num_heads % args.ulysses_size == 0, f"`{cfg.num_heads=}` cannot be divided evenly by `{args.ulysses_size=}`."
@@ -519,7 +509,6 @@ def generate(args):
         args.base_seed = base_seed[0]
 
     assert args.task == "infinitetalk-14B", 'You should choose infinitetalk in args.task.'
-    
 
     logging.info("Creating infinitetalk pipeline.")
     wan_i2v = wan.InfiniteTalkPipeline(
@@ -529,8 +518,8 @@ def generate(args):
         device_id=device,
         rank=rank,
         t5_fsdp=args.t5_fsdp,
-        dit_fsdp=args.dit_fsdp, 
-        use_usp=(args.ulysses_size > 1 or args.ring_size > 1),  
+        dit_fsdp=args.dit_fsdp,
+        use_usp=(args.ulysses_size > 1 or args.ring_size > 1),
         t5_cpu=args.t5_cpu,
         lora_dir=args.lora_dir,
         lora_scales=args.lora_scale,
@@ -543,30 +532,44 @@ def generate(args):
         wan_i2v.enable_vram_management(
             num_persistent_param_in_dit=args.num_persistent_param_in_dit
         )
-    
+
+    wav2vec_feature_extractor, audio_encoder = custom_init('cpu', args.wav2vec_dir)
+
+    return wan_i2v, wav2vec_feature_extractor, audio_encoder, rank
+
+
+def generate_single(args, wan_i2v, wav2vec_feature_extractor, audio_encoder, rank):
+    """Generate a single video using an already-loaded pipeline.
+
+    Args:
+        args: generation arguments (must include input_json, save_file, etc.)
+        wan_i2v: loaded InfiniteTalkPipeline
+        wav2vec_feature_extractor: loaded wav2vec feature extractor
+        audio_encoder: loaded audio encoder
+        rank: current process rank
+    """
     generated_list = []
     with open(args.input_json, 'r', encoding='utf-8') as f:
         input_data = json.load(f)
-        
-    wav2vec_feature_extractor, audio_encoder= custom_init('cpu', args.wav2vec_dir)
-    args.audio_save_dir = os.path.join(args.audio_save_dir, input_data['cond_video'].split('/')[-1].split('.')[0])
-    os.makedirs(args.audio_save_dir,exist_ok=True)
-    
+
+    audio_save_dir = os.path.join(args.audio_save_dir, input_data['cond_video'].split('/')[-1].split('.')[0])
+    os.makedirs(audio_save_dir, exist_ok=True)
+
     conds_list = []
 
     if args.scene_seg and is_video(input_data['cond_video']):
-        time_list, cond_list = shot_detect(input_data['cond_video'], args.audio_save_dir)
+        time_list, cond_list = shot_detect(input_data['cond_video'], audio_save_dir)
         if len(time_list)==0:
             conds_list.append([input_data['cond_video']])
             conds_list.append([input_data['cond_audio']['person1']])
             if len(input_data['cond_audio'])==2:
                 conds_list.append([input_data['cond_audio']['person2']])
         else:
-            audio1_list = split_wav_librosa(input_data['cond_audio']['person1'], time_list, args.audio_save_dir)
+            audio1_list = split_wav_librosa(input_data['cond_audio']['person1'], time_list, audio_save_dir)
             conds_list.append(cond_list)
             conds_list.append(audio1_list)
             if len(input_data['cond_audio'])==2:
-                audio2_list = split_wav_librosa(input_data['cond_audio']['person2'], time_list, args.audio_save_dir)
+                audio2_list = split_wav_librosa(input_data['cond_audio']['person2'], time_list, audio_save_dir)
                 conds_list.append(audio2_list)
     else:
         conds_list.append([input_data['cond_video']])
@@ -576,16 +579,16 @@ def generate(args):
 
     if len(input_data['cond_audio'])==2:
         new_human_speech1, new_human_speech2, sum_human_speechs = audio_prepare_multi(input_data['cond_audio']['person1'], input_data['cond_audio']['person2'], input_data['audio_type'])
-        sum_audio = os.path.join(args.audio_save_dir, 'sum_all.wav')
+        sum_audio = os.path.join(audio_save_dir, 'sum_all.wav')
         sf.write(sum_audio, sum_human_speechs, 16000)
         input_data['video_audio'] = sum_audio
     else:
         human_speech = audio_prepare_single(input_data['cond_audio']['person1'])
-        sum_audio = os.path.join(args.audio_save_dir, 'sum_all.wav')
+        sum_audio = os.path.join(audio_save_dir, 'sum_all.wav')
         sf.write(sum_audio, human_speech, 16000)
         input_data['video_audio'] = sum_audio
     logging.info("Generating video ...")
-        
+
     for idx, items in enumerate(zip(*conds_list)):
         print(items)
         input_clip = {}
@@ -602,29 +605,27 @@ def generate(args):
                 new_human_speech1, new_human_speech2, sum_human_speechs = audio_prepare_multi(items[1], items[2], input_data['audio_type'])
                 audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
                 audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
-                emb1_path = os.path.join(args.audio_save_dir, '1.pt')
-                emb2_path = os.path.join(args.audio_save_dir, '2.pt')
-                sum_audio = os.path.join(args.audio_save_dir, 'sum.wav')
+                emb1_path = os.path.join(audio_save_dir, '1.pt')
+                emb2_path = os.path.join(audio_save_dir, '2.pt')
+                sum_audio = os.path.join(audio_save_dir, 'sum.wav')
                 sf.write(sum_audio, sum_human_speechs, 16000)
                 torch.save(audio_embedding_1, emb1_path)
                 torch.save(audio_embedding_2, emb2_path)
                 cond_audio['person1'] = emb1_path
                 cond_audio['person2'] = emb2_path
                 input_clip['video_audio'] = sum_audio
-                v_length = audio_embedding_1.shape[0]
             elif len(input_data['cond_audio'])==1:
                 human_speech = audio_prepare_single(items[1])
                 audio_embedding = get_embedding(human_speech, wav2vec_feature_extractor, audio_encoder)
-                emb_path = os.path.join(args.audio_save_dir, '1.pt')
-                sum_audio = os.path.join(args.audio_save_dir, 'sum.wav')
+                emb_path = os.path.join(audio_save_dir, '1.pt')
+                sum_audio = os.path.join(audio_save_dir, 'sum.wav')
                 sf.write(sum_audio, human_speech, 16000)
                 torch.save(audio_embedding, emb_path)
                 cond_audio['person1'] = emb_path
                 input_clip['video_audio'] = sum_audio
-                v_length = audio_embedding.shape[0]
-        
+
         input_clip['cond_audio'] = cond_audio
-                    
+
         video = wan_i2v.generate_infinitetalk(
             input_clip,
             size_buckget=args.size,
@@ -637,25 +638,29 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model,
             max_frames_num=args.frame_num if args.mode == 'clip' else args.max_frame_num,
-            color_correction_strength = args.color_correction_strength,
+            color_correction_strength=args.color_correction_strength,
             extra_args=args,
             )
-        
+
         generated_list.append(video)
 
     if rank == 0:
-        
-        if args.save_file is None:
+        save_file = args.save_file
+        if save_file is None:
             formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            formatted_prompt = input_clip['prompt'].replace(" ", "_").replace("/",
-                                                                        "_")[:50]
-            args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}"
-        
+            formatted_prompt = input_clip['prompt'].replace(" ", "_").replace("/", "_")[:50]
+            save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}"
+
         sum_video = torch.cat(generated_list, dim=1)
-        save_video_ffmpeg(sum_video, args.save_file, [input_data['video_audio']], high_quality_save=False)
-   
-    logging.info(f"Saving generated video to {args.save_file}.mp4")  
+        save_video_ffmpeg(sum_video, save_file, [input_data['video_audio']], high_quality_save=False)
+
+    logging.info(f"Saving generated video to {args.save_file}.mp4")
     logging.info("Finished.")
+
+
+def generate(args):
+    wan_i2v, wav2vec_feature_extractor, audio_encoder, rank = init_pipeline(args)
+    generate_single(args, wan_i2v, wav2vec_feature_extractor, audio_encoder, rank)
 
 
 def main():
